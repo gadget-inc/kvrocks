@@ -1,0 +1,122 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Build Release Artifacts
+
+on: [push]
+
+jobs:
+  build-artifacts:
+    name: Build Release Artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-x86_64
+            os: macos-13
+            runs-on: 'macos-13'
+            compiler: auto
+            arch: x86_64
+          - name: macos-arm64
+            os: macos-14
+            runs-on: 'macos-14-xlarge'
+            compiler: auto
+            arch: arm64
+          - name: linux-x86_64
+            os: ubuntu-20.04
+            runs-on: 'ubuntu-20.04-xlarge'
+            compiler: gcc
+            arch: x86_64
+          - name: linux-arm64
+            os: ubuntu-22.04
+            runs-on: 'ubuntu-22.04-xlarge-arm'
+            compiler: gcc
+            arch: arm64
+            qemu: true
+
+    runs-on: ['${{ matrix.runs-on }}']
+    steps:
+      - uses: actions/checkout@v4
+
+      # Setup macos
+      - name: Setup macos
+        if: ${{ startsWith(matrix.os, 'macos') }}
+        run: |
+          brew install cmake gcc autoconf automake libtool openssl coreutils
+          echo "NPROC=$(sysctl -n hw.ncpu)" >> $GITHUB_ENV
+          echo "CMAKE_EXTRA_DEFS=-DOPENSSL_ROOT_DIR=/usr/local/opt/openssl" >> $GITHUB_ENV
+
+      # Setup linux
+      - name: Setup linux
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+        run: |
+          sudo apt update
+          sudo apt install -y ninja-build
+          echo "NPROC=$(nproc)" >> $GITHUB_ENV
+
+      # Build for macos
+      - name: Build macos Binary
+        if: ${{ startsWith(matrix.os, 'macos') }}
+        run: |
+          ./x.py build -j$NPROC --compiler ${{ matrix.compiler }} \
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
+            -DPORTABLE=1 \
+            ${{ env.CMAKE_EXTRA_DEFS }}
+
+      # Build for linux
+      - name: Build linux Binary
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+        run: |
+          ./x.py build -j$NPROC --compiler ${{ matrix.compiler }} -DPORTABLE=1
+
+      # Package artifacts
+      - name: Package Artifacts
+        run: |
+          ARTIFACT_NAME="kvrocks-${{ github.sha }}-${{ matrix.name }}"
+          mkdir -p "dist/${ARTIFACT_NAME}"
+          cp build/kvrocks "dist/${ARTIFACT_NAME}/"
+          cp kvrocks.conf LICENSE NOTICE "dist/${ARTIFACT_NAME}/"
+          cd dist
+          tar czf "${ARTIFACT_NAME}.tar.gz" "${ARTIFACT_NAME}"
+
+      # Upload artifacts
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kvrocks-${{ matrix.name }}
+          path: dist/*.tar.gz
+          retention-days: 1
+
+  create-release:
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          
+      - name: Generate short SHA
+        id: vars
+        run: echo "sha_short=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*.tar.gz
+          tag_name: snapshot-${{ steps.vars.outputs.sha_short }}-${{ github.run_number }}
+
